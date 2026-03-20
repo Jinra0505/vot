@@ -80,6 +80,16 @@ def _resolve_time_value(raw: Any, t: int, default: float | None = None) -> float
     return float(raw)
 
 
+def _effective_station_power_cap(data: Dict[str, Any], station: str, t: int) -> float:
+    runtime_caps = data.get("diagnostics_runtime", {}).get("station_power_cap_effective", {})
+    if station in runtime_caps:
+        cap = _resolve_time_value(runtime_caps.get(station, {}), t, None)
+        if cap is not None:
+            return max(0.0, float(cap))
+    station_cfg = data.get("parameters", {}).get("stations", {}).get(station, {})
+    return max(0.0, float(_resolve_time_value(station_cfg.get("P_site", {}), t, 0.0) or 0.0))
+
+
 def _vt_charge_power_upper_bound(
     data: Dict[str, Any],
     dep: str,
@@ -140,33 +150,37 @@ def compute_station_loads_from_flows(
     - E_vt_req[s][t], P_vt_req_kw_energy[s][t], P_vt_req_kw_grid[s][t]
     - P_total_req[s][t]
     """
-    stations = _hybrid_station_list(data)
+    ev_stations = [str(x) for x in data.get("sets", {}).get("ev_stations", [])]
+    hybrid_stations = _hybrid_station_list(data)
     delta_t = float(data["meta"]["delta_t"])
-    station_params = data["parameters"]["stations"]
 
     d_vt_route = aggregate_evtol_demand(flows, itineraries, times)
     e_vt_dep = compute_evtol_energy_demand(d_vt_route, itineraries, times)
     e_ev_station = aggregate_ev_energy_demand(itineraries, flows, times)
     vt_departure_flow_by_class = aggregate_vt_departure_flow_by_class(itineraries, flows, times)
 
-    E_ev_req = {s: {t: 0.0 for t in times} for s in stations}
-    E_vt_req = {s: {t: 0.0 for t in times} for s in stations}
-    P_ev_req = {s: {t: 0.0 for t in times} for s in stations}
-    P_vt_req_energy = {s: {t: 0.0 for t in times} for s in stations}
-    P_vt_req_grid = {s: {t: 0.0 for t in times} for s in stations}
-    P_total_req = {s: {t: 0.0 for t in times} for s in stations}
+    E_ev_req = {s: {t: 0.0 for t in times} for s in ev_stations}
+    E_vt_req = {s: {t: 0.0 for t in times} for s in hybrid_stations}
+    P_ev_req = {s: {t: 0.0 for t in times} for s in ev_stations}
+    P_vt_req_energy = {s: {t: 0.0 for t in times} for s in hybrid_stations}
+    P_vt_req_grid = {s: {t: 0.0 for t in times} for s in hybrid_stations}
+    P_total_req = {s: {t: 0.0 for t in times} for s in ev_stations}
 
-    for s in stations:
+    for s in ev_stations:
         for t in times:
             E_ev_req[s][t] = float(e_ev_station.get(s, {}).get(t, 0.0))
-            E_vt_req[s][t] = float(e_vt_dep.get(s, {}).get(t, 0.0))
             P_ev_req[s][t] = E_ev_req[s][t] / delta_t if delta_t > 0 else 0.0
+            P_total_req[s][t] = P_ev_req[s][t]
+
+    for s in hybrid_stations:
+        for t in times:
+            E_vt_req[s][t] = float(e_vt_dep.get(s, {}).get(t, 0.0))
             eta = 1.0
             if s in data["parameters"].get("vertiport_storage", {}):
                 eta = max(1e-6, float(data["parameters"]["vertiport_storage"][s].get("eta_ch", 1.0)))
             P_vt_req_energy[s][t] = E_vt_req[s][t] / delta_t if delta_t > 0 else 0.0
             P_vt_req_grid[s][t] = E_vt_req[s][t] / (eta * delta_t) if delta_t > 0 else 0.0
-            P_total_req[s][t] = P_ev_req[s][t] + P_vt_req_grid[s][t]
+            P_total_req.setdefault(s, {tt: 0.0 for tt in times})[t] = P_ev_req.get(s, {}).get(t, 0.0) + P_vt_req_grid[s][t]
 
     return {
         "E_ev_req": E_ev_req,
@@ -269,7 +283,7 @@ def _solve_shared_power_core_gurobi(
             p_ev_req = ev_energy.get(s, {}).get(t, 0.0) / delta_t
             p_vt_sum = gp.quicksum(P_vt[dep, t] for dep in e_dep if dep == s)
             power_constraints[s, t] = model.addConstr(
-                p_vt_sum + p_ev_req - shed_ev[s, t] <= station_params[s]["P_site"][t],
+                p_vt_sum + p_ev_req - shed_ev[s, t] <= _effective_station_power_cap(data, s, t),
                 name=f"P_shared_{s}_{t}",
             )
             model.addConstr(shed_ev[s, t] <= p_ev_req, name=f"shed_ev_ub_{s}_{t}")
@@ -309,7 +323,7 @@ def _solve_shared_power_core_gurobi(
             p_vt_sum = sum(P_out.get(dep, {}).get(t, 0.0) for dep in e_dep if dep == s)
             residuals["INV3"] = max(
                 residuals["INV3"],
-                max(0.0, p_vt_sum + p_ev_req - shed_ev_out[s][t] - station_params[s]["P_site"][t]),
+                max(0.0, p_vt_sum + p_ev_req - shed_ev_out[s][t] - _effective_station_power_cap(data, s, t)),
             )
             residuals["INV4"] = max(residuals["INV4"], max(0.0, shed_ev_out[s][t]))
 
@@ -422,7 +436,7 @@ def solve_shared_power_inventory_highs(
                     row[var_idx[("P", dep, t)]] += 1.0
             row[var_idx[("SEV", s, t)]] = -1.0
             A_ub.append(row)
-            b_ub.append(float(station_params[s]["P_site"][t]) - p_ev_req_kw[s][t])
+            b_ub.append(float(_effective_station_power_cap(data, s, t)) - p_ev_req_kw[s][t])
             cap_rows.append((s, t, len(A_ub) - 1))
 
     A_ub_np = np.array(A_ub, dtype=float) if A_ub else None
@@ -540,7 +554,7 @@ def solve_shared_power_inventory_highs(
             p_vt_sum = sum(P_out.get(dep, {}).get(t, 0.0) for dep in deps if dep == s)
             residuals["INV3"] = max(
                 residuals["INV3"],
-                max(0.0, p_vt_sum + p_ev_req_kw[s][t] - shed_ev_out[s][t] - station_params[s]["P_site"][t]),
+                max(0.0, p_vt_sum + p_ev_req_kw[s][t] - shed_ev_out[s][t] - _effective_station_power_cap(data, s, t)),
             )
             residuals["INV4"] = max(residuals["INV4"], max(0.0, shed_ev_out[s][t]))
 
@@ -634,7 +648,7 @@ def _solve_shared_power_core_heuristic(
         b = float(storage_params.get(s, {}).get("B_init", b_min))
         B_out[s][times_ext[0]] = b
         for idx, t in enumerate(times):
-            p_site = float(station_params[s]["P_site"][t])
+            p_site = float(_effective_station_power_cap(data, s, t))
             p_ev_req = float(ev_energy.get(s, {}).get(t, 0.0)) / max(1.0e-9, delta_t)
             if p_ev_req > p_site:
                 shed_ev_out[s][t] = p_ev_req - p_site
@@ -856,7 +870,7 @@ def solve_charging(
         for t in times:
             vt_power = gp.quicksum(P_vt[dep, t] for dep in e_dep or {} if dep == s) if include_vt else 0.0
             model.addConstr(
-                gp.quicksum(p_ch[m, s, t] for m in vehicles) + vt_power <= station_params[s]["P_site"][t],
+                gp.quicksum(p_ch[m, s, t] for m in vehicles) + vt_power <= _effective_station_power_cap(data, s, t),
                 name=f"P_site_{s}_{t}",
             )
             model.addConstr(gp.quicksum(y[m, s, t] for m in vehicles) <= cap, name=f"cap_{s}_{t}")
@@ -946,7 +960,7 @@ def _solve_charging_pulp(
     inv_residuals = None
     shadow_prices = None
 
-    P_vt_remaining = {s: {t: station_params[s]["P_site"][t] for t in times} for s in stations}
+    P_vt_remaining = {s: {t: _effective_station_power_cap(data, s, t) for t in times} for s in stations}
     if include_vt:
         B_out = {dep: {t: 0.0 for t in times} for dep in e_dep}
         P_out = {dep: {t: 0.0 for t in times} for dep in e_dep}
@@ -1048,7 +1062,7 @@ def compute_charging_residuals(
             if P_vt and s in P_vt:
                 total_power += P_vt[s][t]
             total_y = sum(y[m][s][t] for m in vehicles)
-            P_site = station_params[s]["P_site"][t]
+            P_site = _effective_station_power_cap(data, s, t)
             residuals["C15"] = max(residuals["C15"], max(0.0, total_power - P_site))
             residuals["C16"] = max(residuals["C16"], max(0.0, total_y - cap))
     return residuals
