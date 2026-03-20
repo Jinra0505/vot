@@ -54,6 +54,7 @@ config:
   fail_on_infeasible_demand: false
   terminal_soc_target_kwh: null
   manual_peak_t: null
+  use_distribution_grid: false
 sets:
   time:
   - 1
