@@ -37,7 +37,7 @@ config:
   patience_require_strict_gate: false
   voll_vt_per_kwh: 220
   flow_msa_alpha: 0.08
-  use_distribution_grid: false
+  use_distribution_grid: true
 sets:
   time:
   - 1
