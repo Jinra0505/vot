@@ -1742,7 +1742,7 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
                 vals = snapshot["stations"]["s1"]
                 print(
                     f"peak_t={peak_t} s1_eff_price={vals['effective_price']:.3f} "
-                    f"(base={vals['base_price']:.3f},sur={vals['surcharge']:.3f})"
+                    f"(base={vals['base_price']:.3f},grid={vals.get('grid_component', 0.0):.3f},local={vals.get('local_component', 0.0):.3f})"
                 )
             if representative_od:
                 print(
@@ -1780,7 +1780,7 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
             if strict_gate_required:
                 qualifies = strict_gate_ok
             else:
-                qualifies = (metric < config["tol"]) or improved
+                qualifies = metric < config["tol"]
             if qualifies:
                 good_count += 1
             else:
@@ -1797,7 +1797,7 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
                         vals = snapshot["stations"]["s1"]
                         print(
                             f"peak_t={peak_t} s1_eff_price={vals['effective_price']:.3f} "
-                            f"(base={vals['base_price']:.3f},sur={vals['surcharge']:.3f})"
+                            f"(base={vals['base_price']:.3f},grid={vals.get('grid_component', 0.0):.3f},local={vals.get('local_component', 0.0):.3f})"
                         )
                     if representative_od:
                         print(
@@ -1853,8 +1853,10 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
             for t in times:
                 cap_violation = max(cap_violation, max(0.0, time_map[t] - cap_pax[dep][t]))
 
-    power_violation = 0.0
+    power_violation_site_raw = 0.0
+    power_violation_effective_cap = 0.0
     power_mode = str(config.get("power_violation_mode", "net"))
+    final_effective_caps = data.get("diagnostics_runtime", {}).get("station_power_cap_effective", {})
     for s in power_stations:
         for t in times:
             if run_dispatch:
@@ -1868,7 +1870,9 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
                     p_ev_served = max(0.0, p_ev_req[s][t] - (shed_ev or {}).get(s, {}).get(t, 0.0))
                     p_vt_served = (P_vt_lp or {}).get(s, {}).get(t, p_vt_req_grid[s][t])
                     total_power = p_ev_served + p_vt_served
-            power_violation = max(power_violation, max(0.0, total_power - station_params[s]["P_site"][t]))
+            power_violation_site_raw = max(power_violation_site_raw, max(0.0, total_power - station_params[s]["P_site"][t]))
+            eff_cap_here = float(final_effective_caps.get(s, {}).get(t, station_params[s]["P_site"][t]))
+            power_violation_effective_cap = max(power_violation_effective_cap, max(0.0, total_power - eff_cap_here))
 
     inflow_total, outflow_total, model_inflow_total, model_outflow_total, bg_inflow_total, bg_outflow_total = _boundary_flows_with_background(
         arc_flows,
@@ -2002,6 +2006,30 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
     min_bus_voltage = min((float(v) for bus in bus_voltage_map.values() for v in bus.values()), default=1.0)
     max_grid_shadow_price = max((float(v) for st in grid_shadow_map.values() for v in st.values()), default=0.0)
 
+    # Recompute final exported price objects from the converged end-of-loop state so
+    # output/report prices exactly match the final grid + local surcharge state.
+    effective_prices = {
+        s: {
+            t: float(electricity_price[s][t])
+            + float(grid_shadow_map.get(s, {}).get(t, 0.0))
+            + float(energy_surcharge.get(s, {}).get(t, 0.0))
+            for t in times
+        }
+        for s in ev_stations
+    }
+    effective_price_components = {
+        s: {
+            t: {
+                "base_price": float(electricity_price[s][t]),
+                "grid_component": float(grid_shadow_map.get(s, {}).get(t, 0.0)),
+                "local_component": float(energy_surcharge.get(s, {}).get(t, 0.0)),
+                "effective_price": float(effective_prices[s][t]),
+            }
+            for t in times
+        }
+        for s in ev_stations
+    }
+
     results = {
         "x": arc_flows,
         "tau": tau,
@@ -2034,7 +2062,9 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
         },
         "validation": {
             "cap_violation": cap_violation,
-            "power_violation": power_violation,
+            "power_violation": power_violation_effective_cap,
+            "power_violation_site_raw": power_violation_site_raw,
+            "power_violation_effective_cap": power_violation_effective_cap,
         },
         "residuals": residuals,
         "convergence": {
@@ -2078,6 +2108,8 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
             "station_grid_available_power": grid_results.get("station_grid_available_power", {}),
             "station_grid_shadow_price": grid_results.get("station_grid_shadow_price", {}),
             "station_power_cap_effective": station_power_cap_effective,
+            "power_violation_site_raw": power_violation_site_raw,
+            "power_violation_effective_cap": power_violation_effective_cap,
             "grid_binding_count": grid_results.get("grid_binding_count", 0),
             "num_stations_grid_limited": num_stations_grid_limited,
             "max_branch_loading_ratio": max_branch_loading_ratio,

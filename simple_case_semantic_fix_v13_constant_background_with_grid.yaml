@@ -20,7 +20,7 @@ config:
   shadow_price_cap_abs: 2.2
   strict_audit: true
   audit_raise: true
-  strict_convergence: false
+  strict_convergence: true
   min_vt_reroute_share: 0.05
   min_multimodal_reroute_share: 0.06
   vt_queue_a_fast: 0.14
@@ -34,7 +34,7 @@ config:
   shared_power_solver: highs
   terminal_soc_policy: at_least_init
   shadow_price_scale: 0.038
-  patience_require_strict_gate: false
+  patience_require_strict_gate: true
   output_full_json: true
   vt_enforce_fast_le_slow: true
   surcharge_method: shadow_lp

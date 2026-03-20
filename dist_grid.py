@@ -126,7 +126,6 @@ def solve_distribution_grid(
     branch_data = topo["branch_data"]
     children = topo["children"]
     outgoing_branch = topo["outgoing_branch"]
-    downstream = topo["downstream"]
     station_to_bus = {str(k): str(v) for k, v in grid.get("station_to_bus", {}).items()}
     bus_limits = {str(k): v for k, v in grid.get("grid_bus_limits", {}).items()}
     base_load_p = {str(k): v for k, v in grid.get("grid_base_load_p", {}).items()}
@@ -157,128 +156,156 @@ def solve_distribution_grid(
         "branch_overload_count": 0,
         "substation_binding_count": 0,
         "station_to_bus": station_to_bus,
-        "solver": "highs",
+        "solver": "highs_two_stage",
     }
 
     for t in times:
         station_list = list(station_to_bus.keys())
-        var_idx: Dict[Tuple[str, str], int] = {}
-        c: List[float] = []
-        bounds: List[Tuple[float | None, float | None]] = []
 
-        def add_var(kind: str, key: str, lb: float | None, ub: float | None, obj: float = 0.0) -> None:
-            var_idx[(kind, key)] = len(c)
-            c.append(float(obj))
-            bounds.append((lb, ub))
+        def _solve_stage(stage: str, served_target: float | None = None):
+            var_idx: Dict[Tuple[str, str], int] = {}
+            c: List[float] = []
+            bounds: List[Tuple[float | None, float | None]] = []
 
-        for s in station_list:
-            req = max(0.0, float(station_power_request_kw.get(s, {}).get(t, 0.0)))
-            add_var("PSTAT", s, 0.0, req, -1.0)
-        for br in branches:
-            lim = float(_time_value(branch_data[br].get("p_max"), t, 0.0))
-            add_var("PF", br, -lim, lim, 0.0)
-        for bus in buses:
-            lim = bus_limits.get(bus, {})
-            add_var("V", bus, float(lim.get("v_min", 0.95)), float(lim.get("v_max", 1.05)), 0.0)
-        add_var("PGRID", root, 0.0, float(_time_value(sub_cap, t, 1.0e12)), 1.0e-6)
+            def add_var(kind: str, key: str, lb: float | None, ub: float | None, obj: float = 0.0) -> None:
+                var_idx[(kind, key)] = len(c)
+                c.append(float(obj))
+                bounds.append((lb, ub))
 
-        n = len(c)
-        A_eq: List[List[float]] = []
-        b_eq: List[float] = []
-        A_ub: List[List[float]] = []
-        b_ub: List[float] = []
-        station_rows: Dict[str, int] = {}
-        branch_lim_rows: Dict[str, Tuple[int, int]] = {}
-        voltage_rows: Dict[str, Tuple[int, int]] = {}
-        substation_row: int | None = None
+            for s in station_list:
+                req = max(0.0, float(station_power_request_kw.get(s, {}).get(t, 0.0)))
+                add_var("PSTAT", s, 0.0, req, -1.0 if stage == "served" else 0.0)
+            for br in branches:
+                lim = float(_time_value(branch_data[br].get("p_max"), t, 0.0))
+                add_var("PF", br, -lim, lim, 0.0)
+            for bus in buses:
+                lim = bus_limits.get(bus, {})
+                add_var("V", bus, float(lim.get("v_min", 0.95)), float(lim.get("v_max", 1.05)), 0.0)
+            add_var("PGRID", root, 0.0, float(_time_value(sub_cap, t, 1.0e12)), 1.0e-6 if stage == "served" else 0.0)
+            if stage == "fair":
+                add_var("Z", "fair", 0.0, 1.0, 1.0)
 
-        row = [0.0] * n
-        row[var_idx[("V", root)]] = 1.0
-        A_eq.append(row)
-        b_eq.append(root_voltage)
+            n = len(c)
+            A_eq: List[List[float]] = []
+            b_eq: List[float] = []
+            A_ub: List[List[float]] = []
+            b_ub: List[float] = []
+            station_rows: Dict[str, int] = {}
+            branch_lim_rows: Dict[str, Tuple[int, int]] = {}
+            voltage_rows: Dict[str, Tuple[int, int]] = {}
+            substation_row: int | None = None
 
-        for bus in buses:
             row = [0.0] * n
-            if bus == root:
-                row[var_idx[("PGRID", root)]] = 1.0
-            else:
-                parent = topo["parent"][bus]
-                br_in = outgoing_branch[(parent, bus)]
-                row[var_idx[("PF", br_in)]] += 1.0
-            for child in children.get(bus, []):
-                br_out = outgoing_branch[(bus, child)]
-                row[var_idx[("PF", br_out)]] -= 1.0
-            for s in bus_to_stations.get(bus, []):
-                row[var_idx[("PSTAT", s)]] -= 1.0
+            row[var_idx[("V", root)]] = 1.0
             A_eq.append(row)
-            fixed_load = float(_time_value(base_load_p.get(bus, 0.0), t, 0.0))
-            b_eq.append(fixed_load)
+            b_eq.append(root_voltage)
 
-        for frm, childs in children.items():
-            for to in childs:
-                br = outgoing_branch[(frm, to)]
-                r = float(branch_data[br].get("r", 0.0))
+            for bus in buses:
                 row = [0.0] * n
-                row[var_idx[("V", to)]] = 1.0
-                row[var_idx[("V", frm)]] = -1.0
-                row[var_idx[("PF", br)]] = 2.0 * r
+                if bus == root:
+                    row[var_idx[("PGRID", root)]] = 1.0
+                else:
+                    parent = topo["parent"][bus]
+                    br_in = outgoing_branch[(parent, bus)]
+                    row[var_idx[("PF", br_in)]] += 1.0
+                for child in children.get(bus, []):
+                    br_out = outgoing_branch[(bus, child)]
+                    row[var_idx[("PF", br_out)]] -= 1.0
+                for s in bus_to_stations.get(bus, []):
+                    row[var_idx[("PSTAT", s)]] -= 1.0
                 A_eq.append(row)
-                b_eq.append(0.0)
+                fixed_load = float(_time_value(base_load_p.get(bus, 0.0), t, 0.0))
+                b_eq.append(fixed_load)
 
-        for s in station_list:
+            for frm, childs in children.items():
+                for to in childs:
+                    br = outgoing_branch[(frm, to)]
+                    r = float(branch_data[br].get("r", 0.0))
+                    row = [0.0] * n
+                    row[var_idx[("V", to)]] = 1.0
+                    row[var_idx[("V", frm)]] = -1.0
+                    row[var_idx[("PF", br)]] = 2.0 * r
+                    A_eq.append(row)
+                    b_eq.append(0.0)
+
+            if stage == "fair" and served_target is not None:
+                row = [0.0] * n
+                for s in station_list:
+                    row[var_idx[("PSTAT", s)]] = 1.0
+                A_eq.append(row)
+                b_eq.append(float(served_target))
+
+            for s in station_list:
+                row = [0.0] * n
+                row[var_idx[("PSTAT", s)]] = 1.0
+                A_ub.append(row)
+                b_ub.append(float(station_power_request_kw.get(s, {}).get(t, 0.0)))
+                station_rows[s] = len(A_ub) - 1
+
+            for br in branches:
+                lim = float(_time_value(branch_data[br].get("p_max"), t, 0.0))
+                row_pos = [0.0] * n
+                row_pos[var_idx[("PF", br)]] = 1.0
+                A_ub.append(row_pos)
+                b_ub.append(lim)
+                pos_idx = len(A_ub) - 1
+                row_neg = [0.0] * n
+                row_neg[var_idx[("PF", br)]] = -1.0
+                A_ub.append(row_neg)
+                b_ub.append(lim)
+                neg_idx = len(A_ub) - 1
+                branch_lim_rows[br] = (pos_idx, neg_idx)
+
+            for bus in buses:
+                lim = bus_limits.get(bus, {})
+                vmin = float(lim.get("v_min", 0.95))
+                vmax = float(lim.get("v_max", 1.05))
+                row_hi = [0.0] * n
+                row_hi[var_idx[("V", bus)]] = 1.0
+                A_ub.append(row_hi)
+                b_ub.append(vmax)
+                hi_idx = len(A_ub) - 1
+                row_lo = [0.0] * n
+                row_lo[var_idx[("V", bus)]] = -1.0
+                A_ub.append(row_lo)
+                b_ub.append(-vmin)
+                lo_idx = len(A_ub) - 1
+                voltage_rows[bus] = (hi_idx, lo_idx)
+
             row = [0.0] * n
-            row[var_idx[("PSTAT", s)]] = 1.0
+            row[var_idx[("PGRID", root)]] = 1.0
             A_ub.append(row)
-            b_ub.append(float(station_power_request_kw.get(s, {}).get(t, 0.0)))
-            station_rows[s] = len(A_ub) - 1
+            b_ub.append(float(_time_value(sub_cap, t, 1.0e12)))
+            substation_row = len(A_ub) - 1
 
-        for br in branches:
-            lim = float(_time_value(branch_data[br].get("p_max"), t, 0.0))
-            row_pos = [0.0] * n
-            row_pos[var_idx[("PF", br)]] = 1.0
-            A_ub.append(row_pos)
-            b_ub.append(lim)
-            pos_idx = len(A_ub) - 1
-            row_neg = [0.0] * n
-            row_neg[var_idx[("PF", br)]] = -1.0
-            A_ub.append(row_neg)
-            b_ub.append(lim)
-            neg_idx = len(A_ub) - 1
-            branch_lim_rows[br] = (pos_idx, neg_idx)
+            if stage == "fair":
+                z_idx = var_idx[("Z", "fair")]
+                for s in station_list:
+                    req = float(station_power_request_kw.get(s, {}).get(t, 0.0))
+                    if req <= 1.0e-9:
+                        continue
+                    row = [0.0] * n
+                    row[var_idx[("PSTAT", s)]] = -1.0
+                    row[z_idx] = -req
+                    A_ub.append(row)
+                    b_ub.append(-req)
 
-        for bus in buses:
-            lim = bus_limits.get(bus, {})
-            vmin = float(lim.get("v_min", 0.95))
-            vmax = float(lim.get("v_max", 1.05))
-            row_hi = [0.0] * n
-            row_hi[var_idx[("V", bus)]] = 1.0
-            A_ub.append(row_hi)
-            b_ub.append(vmax)
-            hi_idx = len(A_ub) - 1
-            row_lo = [0.0] * n
-            row_lo[var_idx[("V", bus)]] = -1.0
-            A_ub.append(row_lo)
-            b_ub.append(-vmin)
-            lo_idx = len(A_ub) - 1
-            voltage_rows[bus] = (hi_idx, lo_idx)
+            res = linprog(
+                c=np.array(c, dtype=float),
+                A_ub=np.array(A_ub, dtype=float),
+                b_ub=np.array(b_ub, dtype=float),
+                A_eq=np.array(A_eq, dtype=float),
+                b_eq=np.array(b_eq, dtype=float),
+                bounds=bounds,
+                method="highs",
+            )
+            if not res.success:
+                raise DistributionGridError(f"Distribution-grid LP failed at t={t}, stage={stage}: {res.message}")
+            return res, var_idx, station_rows, branch_lim_rows, voltage_rows, substation_row
 
-        row = [0.0] * n
-        row[var_idx[("PGRID", root)]] = 1.0
-        A_ub.append(row)
-        b_ub.append(float(_time_value(sub_cap, t, 1.0e12)))
-        substation_row = len(A_ub) - 1
-
-        res = linprog(
-            c=np.array(c, dtype=float),
-            A_ub=np.array(A_ub, dtype=float),
-            b_ub=np.array(b_ub, dtype=float),
-            A_eq=np.array(A_eq, dtype=float),
-            b_eq=np.array(b_eq, dtype=float),
-            bounds=bounds,
-            method="highs",
-        )
-        if not res.success:
-            raise DistributionGridError(f"Distribution-grid LP failed at t={t}: {res.message}")
+        res1, idx1, station_rows1, branch_rows1, voltage_rows1, sub_row1 = _solve_stage("served")
+        served_target = sum(float(res1.x[idx1[("PSTAT", s)]]) for s in station_list)
+        res, var_idx, station_rows, branch_lim_rows, voltage_rows, substation_row = _solve_stage("fair", served_target)
 
         x = res.x
         marg = getattr(getattr(res, "ineqlin", None), "marginals", None)

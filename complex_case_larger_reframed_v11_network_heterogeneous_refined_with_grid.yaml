@@ -20,7 +20,7 @@ config:
   shadow_price_cap_abs: 4.5
   strict_audit: true
   audit_raise: true
-  strict_convergence: false
+  strict_convergence: true
   min_vt_reroute_share: 0.08
   vt_queue_a_fast: 0.35
   vt_queue_a_slow: 0.45
@@ -34,7 +34,7 @@ config:
   terminal_soc_policy: at_least_init
   min_multimodal_reroute_share: 0.06
   shadow_price_scale: 0.0105
-  patience_require_strict_gate: false
+  patience_require_strict_gate: true
   voll_vt_per_kwh: 220
   flow_msa_alpha: 0.08
   use_distribution_grid: true
