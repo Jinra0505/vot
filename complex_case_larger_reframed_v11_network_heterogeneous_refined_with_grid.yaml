@@ -2,13 +2,13 @@ meta:
   T: 12
   delta_t: 1.0
 config:
-  max_iter: 280
-  max_total_iter: 360
+  max_iter: 320
+  max_total_iter: 420
   min_iters: 40
   patience: 130
   tol: 0.7
   eps_improve: 1.0e-06
-  surcharge_msa_alpha: 0.025
+  surcharge_msa_alpha: 0.015
   surcharge_kappa: 0.0105
   surcharge_beta: 1.0
   representative_od: B-E
@@ -36,7 +36,7 @@ config:
   shadow_price_scale: 0.0105
   patience_require_strict_gate: true
   voll_vt_per_kwh: 220
-  flow_msa_alpha: 0.08
+  flow_msa_alpha: 0.05
   vt_enforce_fast_le_slow: true
   use_distribution_grid: true
 sets:

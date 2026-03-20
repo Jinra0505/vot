@@ -229,6 +229,10 @@ def self_audit(results: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any
         for t, entry in t_map.items():
             mu_entry = entry.get("mu_kw")
             mu_kw = float(mu_entry) if mu_entry is not None else 0.0
+            local_mu_kw = float(entry.get("local_mu_kw", mu_kw) or 0.0)
+            grid_mu_kw = float(entry.get("grid_mu_kw", 0.0) or 0.0)
+            total_mu_kw = float(entry.get("mu_total_kw", local_mu_kw + grid_mu_kw) or 0.0)
+            local_dual_available = bool(entry.get("local_dual_available", False))
             solver_entry = entry.get("solver_used")
             surcharge = float(entry.get("raw_surcharge", 0.0))
             uncapped_entry = entry.get("raw_surcharge_uncapped")
@@ -284,7 +288,17 @@ def self_audit(results: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any
             ratio_req = float(entry.get("ratio_req_exogenous", 0.0))
             solver_used_local = str(entry.get("solver_used", diagnostics.get("shared_power_solver_used", "")))
             fallback_used = bool(entry.get("fallback_used", False))
-            if ratio_req > 2.0 and abs(mu_kw) <= 1.0e-9 and solver_used_local == "highs" and not fallback_used:
+            ratio_net_actual = float(entry.get("ratio_net_actual", 0.0))
+            cap_binding_here = bool(entry.get("cap_binding", False))
+            scarcity_expected = local_dual_available or grid_mu_kw > 1.0e-9 or cap_binding_here
+            if (
+                ratio_req > 2.0
+                and ratio_net_actual > 0.98
+                and abs(total_mu_kw) <= 1.0e-9
+                and solver_used_local == "highs"
+                and not fallback_used
+                and scarcity_expected
+            ):
                 warnings.append(f"ratio_req high but mu_kw ~ 0 at {station},{t}")
 
     n_series = diagnostics.get("n_series", {})
@@ -900,9 +914,10 @@ def compute_residuals(
     inflow = [val / delta_t for val in inflow_total]
     outflow = [val / delta_t for val in outflow_total]
     for idx in range(len(times)):
+        expected_n_next = max(0.0, n_series[idx] + delta_t * (inflow[idx] - outflow[idx]))
         residuals["C7"] = max(
             residuals["C7"],
-            abs(n_series[idx + 1] - (n_series[idx] + delta_t * (inflow[idx] - outflow[idx]))),
+            abs(n_series[idx + 1] - expected_n_next),
         )
 
     expected_g = compute_g(n_series, mfd_params)
@@ -1277,6 +1292,8 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
 
         alpha_flow_cfg = config.get("flow_msa_alpha")
         phi_flow = float(alpha_flow_cfg) if alpha_flow_cfg is not None else (2.0 / (iteration + 2.0))
+        if alpha_flow_cfg is not None and bool(config.get("strict_convergence", False)):
+            phi_flow = min(phi_flow, 2.0 / (iteration + 2.0))
         phi_flow = min(1.0, max(1.0e-3, phi_flow))
         if flows_prev is not None:
             for it in itineraries:
@@ -1512,7 +1529,10 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
                 ev_prob_from_shed = min(1.0, max(ev_floor, min(ev_prob_from_shed, grid_prob)))
                 ev_service_prob[s][t] = ev_prob_from_shed
                 solver_used = diagnostics.get("shared_power_solver_used")
-                mu_entry = _clean_number((shadow_prices.get(s, {}) or {}).get(t)) if ((shadow_prices.get(s, {}) or {}).get(t) is not None and solver_used == "highs") else None
+                local_mu_value = float((shadow_prices.get(s, {}) or {}).get(t, 0.0) or 0.0)
+                grid_mu_value = float((grid_results.get("station_grid_shadow_price", {}) or {}).get(s, {}).get(t, 0.0) or 0.0)
+                total_mu_value = local_mu_value + float(config.get("grid_shadow_price_scale", 1.0)) * grid_mu_value
+                mu_entry = _clean_number(local_mu_value) if local_mu_value is not None and solver_used == "highs" else None
                 uncapped_entry = _clean_number(raw_surcharge_uncapped[s][t]) if (raw_surcharge_uncapped[s][t] is not None and solver_used == "highs") else None
                 ratio_req_exogenous = (p_ev_req_kw + p_vt_req_grid_kw) / p_site_den
                 ratio_req_energy = (p_ev_req_kw + p_vt_req_energy_kw) / p_site_den
@@ -1528,6 +1548,10 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
                     "P_vt_req_kw_energy": _clean_number(p_vt_req_energy_kw),
                     "P_vt_req_kw_grid": _clean_number(p_vt_req_grid_kw),
                     "mu_kw": mu_entry,
+                    "local_mu_kw": _clean_number(local_mu_value),
+                    "grid_mu_kw": _clean_number(grid_mu_value),
+                    "mu_total_kw": _clean_number(total_mu_value),
+                    "local_dual_available": bool(s in power_stations),
                     "base_price": float(electricity_price[s][t]),
                     "grid_price_component": float((grid_results.get("station_grid_shadow_price", {}) or {}).get(s, {}).get(t, 0.0)),
                     "local_price_component": float(energy_surcharge[s][t]),
