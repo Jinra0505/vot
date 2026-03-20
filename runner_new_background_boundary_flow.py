@@ -1110,6 +1110,19 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
         "branch_overload_count": 0,
         "substation_binding_count": 0,
     }
+    effective_prices = {s: {t: float(electricity_price[s][t]) for t in times} for s in ev_stations}
+    effective_price_components = {
+        s: {
+            t: {
+                "base_price": float(electricity_price[s][t]),
+                "grid_component": 0.0,
+                "local_component": 0.0,
+                "effective_price": float(electricity_price[s][t]),
+            }
+            for t in times
+        }
+        for s in ev_stations
+    }
 
     costs: Dict[str, Dict[int, Dict[str, float]]] = {}
     x_new = arc_flows
@@ -1129,11 +1142,25 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
         g_by_time = {t: g_series[min(len(g_series) - 1, idx)] for idx, t in enumerate(times)}
         tau = compute_road_times(arc_flows, arc_params, g_by_time, times)
         ev_station_waits = compute_station_waits(utilization, station_params, times)
+        # Traveler-facing effective price uses one unified composition throughout the model:
+        # effective_price = base_price + grid_component + local_component.
         effective_prices = {
             s: {
                 t: electricity_price[s][t]
                 + float((grid_results.get("station_grid_shadow_price", {}) or {}).get(s, {}).get(t, 0.0))
                 + float(energy_surcharge.get(s, {}).get(t, 0.0))
+                for t in times
+            }
+            for s in ev_stations
+        }
+        effective_price_components = {
+            s: {
+                t: {
+                    "base_price": float(electricity_price[s][t]),
+                    "grid_component": float((grid_results.get("station_grid_shadow_price", {}) or {}).get(s, {}).get(t, 0.0)),
+                    "local_component": float(energy_surcharge.get(s, {}).get(t, 0.0)),
+                    "effective_price": float(effective_prices[s][t]),
+                }
                 for t in times
             }
             for s in ev_stations
@@ -1433,6 +1460,8 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
                 p_vt_req_energy_kw = float(p_vt_req_energy.get(s, {}).get(t, 0.0))
                 p_vt_req_grid_kw = float(p_vt_req_grid.get(s, {}).get(t, 0.0))
                 p_ev_served_kw = max(0.0, p_ev_req_kw - (shed_ev or {}).get(s, {}).get(t, 0.0))
+                if s not in power_stations:
+                    p_ev_served_kw = min(p_ev_served_kw, p_site_raw)
                 p_vt_served_kw = (P_vt_lp or {}).get(s, {}).get(t, 0.0)
                 t_idx = times.index(t)
                 t_next = times[t_idx + 1] if t_idx + 1 < len(times) else None
@@ -1453,10 +1482,12 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
                     else:
                         b_after = None
                 if b_before is None:
-                    missing_inventory_reporting = True
+                    if s in power_stations:
+                        missing_inventory_reporting = True
                     b_before = 0.0
                 if b_after is None:
-                    missing_inventory_reporting = True
+                    if s in power_stations:
+                        missing_inventory_reporting = True
                     b_after = 0.0
                 b_before = float(b_before)
                 b_after = float(b_after)
@@ -1489,6 +1520,10 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
                     "P_vt_req_kw_energy": _clean_number(p_vt_req_energy_kw),
                     "P_vt_req_kw_grid": _clean_number(p_vt_req_grid_kw),
                     "mu_kw": mu_entry,
+                    "base_price": float(electricity_price[s][t]),
+                    "grid_price_component": float((grid_results.get("station_grid_shadow_price", {}) or {}).get(s, {}).get(t, 0.0)),
+                    "local_price_component": float(energy_surcharge[s][t]),
+                    "effective_price": float(effective_prices[s][t]),
                     "raw_surcharge_uncapped_kwh": uncapped_entry,
                     "raw_surcharge_uncapped": uncapped_entry,
                     "raw_surcharge_capped_kwh": _clean_number(raw_surcharge[s][t]),
@@ -1553,12 +1588,14 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
             "stations": {},
         }
         for s in power_stations[:3]:
-            base_price = electricity_price[s][peak_t]
-            surcharge = energy_surcharge[s][peak_t]
+            base_price = float(electricity_price[s][peak_t])
+            grid_component = float((grid_results.get("station_grid_shadow_price", {}) or {}).get(s, {}).get(peak_t, 0.0))
+            local_component = float(energy_surcharge[s][peak_t])
             snapshot["stations"][s] = {
                 "base_price": base_price,
-                "surcharge": surcharge,
-                "effective_price": base_price + surcharge,
+                "grid_component": grid_component,
+                "local_component": local_component,
+                "effective_price": float(effective_prices[s][peak_t]),
             }
         diagnostics["price_snapshots"].append(snapshot)
 
@@ -1965,6 +2002,8 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
         "inventory": {"B_vt": B_vt, "P_vt": P_vt, "residuals": inv_residuals},
         "shadow_price_power": shadow_prices,
         "distribution_grid": grid_results,
+        "effective_price": effective_prices,
+        "effective_price_components": effective_price_components,
         "surcharge_power": energy_surcharge,
         "surcharge_power_raw": raw_surcharge,
         "surcharge_power_uncapped": raw_surcharge_uncapped,
@@ -2005,6 +2044,8 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
             "cbd_tau_used": cbd_tau,
             "station_loads": load_agg,
             "distribution_grid": grid_results,
+            "effective_price": effective_prices,
+            "effective_price_components": effective_price_components,
             "vt_service_prob": vt_service_prob,
             "ev_service_prob": ev_service_prob,
             "vt_inventory_B": B_vt_report,
