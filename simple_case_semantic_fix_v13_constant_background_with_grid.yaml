@@ -20,7 +20,7 @@ config:
   shadow_price_cap_abs: 2.2
   strict_audit: true
   audit_raise: true
-  strict_convergence: false
+  strict_convergence: true
   min_vt_reroute_share: 0.05
   min_multimodal_reroute_share: 0.06
   vt_queue_a_fast: 0.14
@@ -34,7 +34,7 @@ config:
   shared_power_solver: highs
   terminal_soc_policy: at_least_init
   shadow_price_scale: 0.038
-  patience_require_strict_gate: false
+  patience_require_strict_gate: true
   output_full_json: true
   vt_enforce_fast_le_slow: true
   surcharge_method: shadow_lp
@@ -54,7 +54,7 @@ config:
   fail_on_infeasible_demand: false
   terminal_soc_target_kwh: null
   manual_peak_t: null
-  use_distribution_grid: false
+  use_distribution_grid: true
 sets:
   time:
   - 1
@@ -328,18 +328,18 @@ parameters:
         r: 0.0002
         x: 0.0001
         p_max:
-          1: 220.0
-          2: 220.0
-          3: 220.0
+          1: 145.0
+          2: 145.0
+          3: 145.0
       sbr12:
         from_bus: sb1
         to_bus: sb2
         r: 0.00035
         x: 0.000175
         p_max:
-          1: 150.0
-          2: 150.0
-          3: 150.0
+          1: 92.0
+          2: 92.0
+          3: 92.0
     grid_bus_limits:
       sb0:
         v_min: 0.82
@@ -377,9 +377,9 @@ parameters:
         2: 0.0
         3: 0.0
     grid_substation_cap:
-      1: 260.0
-      2: 260.0
-      3: 260.0
+      1: 165.0
+      2: 165.0
+      3: 165.0
     grid_root_voltage: 1.0
     grid_price_base:
       1: 0.18
