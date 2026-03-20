@@ -21,8 +21,18 @@ def generate_itineraries(
     """
     if not config.get("use_generator", False):
         return []
+    hybrid = [str(x) for x in data.get("sets", {}).get("hybrid_stations", [])]
+    params = data.get("parameters", {})
+    dep_allowed = {s: bool(params.get("vt_departure_allowed", {}).get(s, True)) for s in hybrid}
+    arr_allowed = {s: bool(params.get("vt_arrival_allowed", {}).get(s, True)) for s in hybrid}
+    feasible_dep_stations = [s for s in hybrid if dep_allowed.get(s, True)]
+    feasible_arr_stations = [s for s in hybrid if arr_allowed.get(s, True)]
+    _ = feasible_dep_stations
+    _ = feasible_arr_stations
     # Placeholder for V1+ MILP generation (not activated in toy data).
     # Future generator should support pure EV/eVTOL and multimodal EV_to_eVTOL fast/slow.
+    # Any future VT itinerary generation should use only feasible_dep_stations for
+    # departures while still allowing arrival-only vertiports in feasible_arr_stations.
     # Keep service-class-aware fallback fares for compatibility.
     _ = _default_evtol_fare(config, "fast")
     _ = _default_evtol_fare(config, "slow")

@@ -955,6 +955,12 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
     arc_params = data["parameters"]["arcs"]
     station_params = data["parameters"]["stations"]
     electricity_price = data["parameters"]["electricity_price"]
+    vt_departure_allowed = {
+        str(k): bool(v) for k, v in data.get("parameters", {}).get("vt_departure_allowed", {}).items()
+    }
+    vt_arrival_allowed = {
+        str(k): bool(v) for k, v in data.get("parameters", {}).get("vt_arrival_allowed", {}).items()
+    }
 
     arc_flows = {a: {t: 0.0 for t in times} for a in arcs}
     utilization = {s: {t: 0.0 for t in times} for s in ev_stations}
@@ -1022,6 +1028,8 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
         "station_sets": {
             "ev_stations": list(ev_stations),
             "hybrid_stations": list(hybrid_stations),
+            "vt_departure_allowed": vt_departure_allowed,
+            "vt_arrival_allowed": vt_arrival_allowed,
         },
         "peak_t_selection_rule": peak_t_rule,
         "peak_t_total_demand": peak_t_total_demand,

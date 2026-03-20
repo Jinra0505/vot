@@ -231,6 +231,14 @@ parameters:
     sE: 40
     sO: 28
     sC: 0
+  vt_departure_allowed:
+    sE: true
+    sO: true
+    sC: false
+  vt_arrival_allowed:
+    sE: true
+    sO: true
+    sC: true
   vt_pax_per_departure_fast: 2.0
   vt_pax_per_departure_slow: 4.0
   vt_turnaround_lag: 1

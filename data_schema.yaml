@@ -26,5 +26,19 @@
     "parameters.vt_pax_per_departure_slow",
     "parameters.vt_aircraft_init_by_station",
     "itineraries"
+  ],
+  "optional_fields": {
+    "parameters.vt_departure_allowed": {
+      "type": "dict[str,bool]",
+      "default_behavior": "If omitted, every hybrid station is treated as VT-departure-allowed."
+    },
+    "parameters.vt_arrival_allowed": {
+      "type": "dict[str,bool]",
+      "default_behavior": "If omitted, every hybrid station is treated as VT-arrival-allowed."
+    }
+  },
+  "notes": [
+    "Optional VT permission fields are normalized in data_loader.py for backward compatibility.",
+    "Arrival-only hybrid stations are represented by vt_departure_allowed=false and vt_arrival_allowed=true."
   ]
 }
