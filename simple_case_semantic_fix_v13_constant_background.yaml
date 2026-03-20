@@ -382,9 +382,9 @@ parameters:
       3: 260.0
     grid_root_voltage: 1.0
     grid_price_base:
-      1: 0.0
-      2: 0.0
-      3: 0.0
+      1: 0.18
+      2: 0.18
+      3: 0.18
 itineraries:
 - id: od_ev_main
   od:

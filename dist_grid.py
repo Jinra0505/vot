@@ -131,6 +131,7 @@ def solve_distribution_grid(
     bus_limits = {str(k): v for k, v in grid.get("grid_bus_limits", {}).items()}
     base_load_p = {str(k): v for k, v in grid.get("grid_base_load_p", {}).items()}
     sub_cap = grid.get("grid_substation_cap", {})
+    grid_price_base = grid.get("grid_price_base", {})
     root_voltage = float(grid.get("grid_root_voltage", 1.0))
 
     bus_to_stations: Dict[str, List[str]] = defaultdict(list)
@@ -328,6 +329,9 @@ def solve_distribution_grid(
             if marg is not None:
                 m = float(marg[station_rows[s]])
                 dual = max(0.0, -m)
+            if dual <= 1.0e-12 and curtailed > 1.0e-9:
+                scarcity_base = max(0.0, float(_time_value(grid_price_base, t, 0.0)))
+                dual = scarcity_base * min(1.0, curtailed / max(1.0e-9, req))
             result["station_grid_shadow_price"][s][t] = dual
 
     return result

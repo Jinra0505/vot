@@ -2249,6 +2249,9 @@ def main() -> None:
             },
             "config_used": data.get("config", {}),
             "equilibrium": equilibrium,
+            "effective_price": results.get("effective_price", {}),
+            "effective_price_components": results.get("effective_price_components", {}),
+            "distribution_grid": results.get("distribution_grid", {}),
             "summary": {
                 "representative_od": diagnostics_full.get("representative_od"),
                 "case_label": diagnostics_full.get("case_label"),
@@ -2285,6 +2288,8 @@ def main() -> None:
                 "terminal_soc_by_station": diagnostics_full.get("terminal_soc_by_station", {}),
                 "storage_energy_totals_by_station": diagnostics_full.get("storage_energy_totals_by_station", {}),
                 "storage_model_status_by_station": diagnostics_full.get("storage_model_status_by_station", {}),
+                "effective_price": diagnostics_full.get("effective_price", {}),
+                "effective_price_components": diagnostics_full.get("effective_price_components", {}),
             }
 
         report["diagnostics"]["surcharge_kappa"] = data.get("config", {}).get("surcharge_kappa")
