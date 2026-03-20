@@ -214,6 +214,7 @@ def load_data(data_path: str, schema_path: str) -> Dict[str, Any]:
     data = _coerce_numeric_values(data)
     _normalize_od_structures(data)
     _harmonize_access_energy_fields(data)
+    data.setdefault("config", {}).setdefault("use_distribution_grid", False)
 
     required_paths = schema.get("required_paths", [])
     try:

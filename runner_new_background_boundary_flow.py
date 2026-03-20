@@ -1984,6 +1984,24 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
     else:
         diagnostics["bottleneck_summary"] = "mixed_without_active_shared_power_price_signal"
 
+    grid_station_caps = grid_results.get("station_grid_available_power", {}) if isinstance(grid_results, dict) else {}
+    station_power_cap_effective = data.get("diagnostics_runtime", {}).get("station_power_cap_effective", {})
+    num_stations_grid_limited = sum(
+        1
+        for s in ev_stations
+        if any(
+            float(grid_station_caps.get(s, {}).get(t, station_params[s]["P_site"][t])) + 1.0e-9 < float(station_params[s]["P_site"][t])
+            and float(load_agg.get("P_total_req", {}).get(s, {}).get(t, 0.0)) > float(grid_station_caps.get(s, {}).get(t, station_params[s]["P_site"][t])) + 1.0e-9
+            for t in times
+        )
+    )
+    branch_loading_map = grid_results.get("branch_loading_ratio", {}) if isinstance(grid_results, dict) else {}
+    bus_voltage_map = grid_results.get("bus_voltage", {}) if isinstance(grid_results, dict) else {}
+    grid_shadow_map = grid_results.get("station_grid_shadow_price", {}) if isinstance(grid_results, dict) else {}
+    max_branch_loading_ratio = max((float(v) for br in branch_loading_map.values() for v in br.values()), default=0.0)
+    min_bus_voltage = min((float(v) for bus in bus_voltage_map.values() for v in bus.values()), default=1.0)
+    max_grid_shadow_price = max((float(v) for st in grid_shadow_map.values() for v in st.values()), default=0.0)
+
     results = {
         "x": arc_flows,
         "tau": tau,
@@ -2059,7 +2077,12 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
             "substation_loading": grid_results.get("substation_loading", {}),
             "station_grid_available_power": grid_results.get("station_grid_available_power", {}),
             "station_grid_shadow_price": grid_results.get("station_grid_shadow_price", {}),
+            "station_power_cap_effective": station_power_cap_effective,
             "grid_binding_count": grid_results.get("grid_binding_count", 0),
+            "num_stations_grid_limited": num_stations_grid_limited,
+            "max_branch_loading_ratio": max_branch_loading_ratio,
+            "min_bus_voltage": min_bus_voltage,
+            "max_grid_shadow_price": max_grid_shadow_price,
             "voltage_violation_count": grid_results.get("voltage_violation_count", 0),
             "branch_overload_count": grid_results.get("branch_overload_count", 0),
             "substation_binding_count": grid_results.get("substation_binding_count", 0),
@@ -2271,6 +2294,10 @@ def main() -> None:
                 "max_surcharge": diagnostics_summary.get("max_surcharge"),
                 "distribution_grid_enabled": diagnostics_full.get("distribution_grid_enabled"),
                 "grid_binding_count": diagnostics_full.get("grid_binding_count"),
+                "num_stations_grid_limited": diagnostics_full.get("num_stations_grid_limited"),
+                "max_branch_loading_ratio": diagnostics_full.get("max_branch_loading_ratio"),
+                "min_bus_voltage": diagnostics_full.get("min_bus_voltage"),
+                "max_grid_shadow_price": diagnostics_full.get("max_grid_shadow_price"),
             },
             "surcharge_power": results["surcharge_power"],
             "surcharge_power_uncapped": results.get("surcharge_power_uncapped", {}),
