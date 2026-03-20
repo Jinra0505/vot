@@ -30,8 +30,8 @@ from .assignment import (
     compute_itinerary_costs,
     logit_assignment,
 )
-from . import charging
-from .charging import compute_station_loads_from_flows, solve_charging
+from . import charging_hiGHS_and_gurobi_bound_fix as charging
+from .charging_hiGHS_and_gurobi_bound_fix import compute_station_loads_from_flows, solve_charging
 from .congestion import compute_road_times, compute_station_waits, compute_vt_departure_waits
 from .data_loader import load_data
 from .dist_grid import solve_distribution_grid
