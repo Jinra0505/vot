@@ -5,6 +5,7 @@
     "config.max_iter",
     "config.tol",
     "config.use_generator",
+    "config.use_distribution_grid",
     "sets.time",
     "sets.groups",
     "sets.arcs",
