@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Set
 
 from .assignment import is_evtol_itinerary
+from .dist_grid import validate_distribution_grid
 from .utils import load_yaml, require_paths
 
 
@@ -213,6 +214,7 @@ def load_data(data_path: str, schema_path: str) -> Dict[str, Any]:
     data = _coerce_numeric_values(data)
     _normalize_od_structures(data)
     _harmonize_access_energy_fields(data)
+    data.setdefault("config", {}).setdefault("use_distribution_grid", False)
 
     required_paths = schema.get("required_paths", [])
     try:
@@ -222,4 +224,5 @@ def load_data(data_path: str, schema_path: str) -> Dict[str, Any]:
 
     _validate_basic_shapes(data)
     _validate_station_facility_consistency(data)
+    validate_distribution_grid(data)
     return data

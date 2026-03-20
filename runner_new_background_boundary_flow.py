@@ -30,10 +30,11 @@ from .assignment import (
     compute_itinerary_costs,
     logit_assignment,
 )
-from . import charging
-from .charging import compute_station_loads_from_flows, solve_charging
+from . import charging_hiGHS_and_gurobi_bound_fix as charging
+from .charging_hiGHS_and_gurobi_bound_fix import compute_station_loads_from_flows, solve_charging
 from .congestion import compute_road_times, compute_station_waits, compute_vt_departure_waits
 from .data_loader import load_data
+from .dist_grid import solve_distribution_grid
 from .itinerary_generator import generate_itineraries
 from .mfd import boundary_flows, compute_g, update_accumulation
 
@@ -117,6 +118,8 @@ def _normalize_config(config: Dict[str, Any]) -> Dict[str, Any]:
     cfg.setdefault("strict_audit", True)
     cfg.setdefault("audit_raise", True)
     cfg.setdefault("strict_convergence", False)
+    cfg.setdefault("use_distribution_grid", False)
+    cfg.setdefault("grid_shadow_price_scale", 1.0)
     cfg.setdefault("patience_require_strict_gate", True)
     cfg.setdefault("shared_power_solver", "highs")
     cfg.setdefault("output_full_json", True)
@@ -962,7 +965,7 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
         delta_t,
     )
     g_series = compute_g(n_series, data["parameters"]["mfd"])
-    energy_surcharge = {s: {t: 0.0 for t in times} for s in power_stations}
+    energy_surcharge = {s: {t: 0.0 for t in times} for s in ev_stations}
     vt_service_prob = {s: {t: 1.0 for t in times} for s in power_stations}
     ev_service_prob = {s: {t: 1.0 for t in times} for s in ev_stations}
     min_iters = int(config.get("min_iters", 10))
@@ -1080,9 +1083,9 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
     e_dep: Dict[str, Dict[int, float]] = {}
     flows_prev: Dict[str, Dict[str, Dict[int, float]]] | None = None
     shadow_prices: Dict[str, Dict[int, float]] | None = None
-    raw_surcharge: Dict[str, Dict[int, float]] = {s: {t: 0.0 for t in times} for s in power_stations}
-    raw_surcharge_uncapped: Dict[str, Dict[int, float | None]] = {s: {t: 0.0 for t in times} for s in power_stations}
-    raw_zero_streak: Dict[str, Dict[int, int]] = {s: {t: 0 for t in times} for s in power_stations}
+    raw_surcharge: Dict[str, Dict[int, float]] = {s: {t: 0.0 for t in times} for s in ev_stations}
+    raw_surcharge_uncapped: Dict[str, Dict[int, float | None]] = {s: {t: 0.0 for t in times} for s in ev_stations}
+    raw_zero_streak: Dict[str, Dict[int, int]] = {s: {t: 0 for t in times} for s in ev_stations}
     shed_ev: Dict[str, Dict[int, float]] | None = None
     shed_vt: Dict[str, Dict[int, float]] | None = None
     P_vt_lp: Dict[str, Dict[int, float]] | None = None
@@ -1092,6 +1095,34 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
     load_agg: Dict[str, Dict[str, Dict[int, float]]] = {}
     lp_ok = False
     missing_inventory_reporting = False
+    grid_results: Dict[str, Any] = {
+        "distribution_grid_enabled": bool(config.get("use_distribution_grid", False)),
+        "station_to_bus": {},
+        "bus_voltage": {},
+        "branch_flow_p": {},
+        "branch_loading_ratio": {},
+        "substation_loading": {},
+        "station_grid_available_power": {s: {t: float(station_params[s]["P_site"][t]) for t in times} for s in ev_stations},
+        "station_grid_shadow_price": {s: {t: 0.0 for t in times} for s in ev_stations},
+        "grid_binding_flags": {},
+        "grid_binding_count": 0,
+        "voltage_violation_count": 0,
+        "branch_overload_count": 0,
+        "substation_binding_count": 0,
+    }
+    effective_prices = {s: {t: float(electricity_price[s][t]) for t in times} for s in ev_stations}
+    effective_price_components = {
+        s: {
+            t: {
+                "base_price": float(electricity_price[s][t]),
+                "grid_component": 0.0,
+                "local_component": 0.0,
+                "effective_price": float(electricity_price[s][t]),
+            }
+            for t in times
+        }
+        for s in ev_stations
+    }
 
     costs: Dict[str, Dict[int, Dict[str, float]]] = {}
     x_new = arc_flows
@@ -1111,8 +1142,27 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
         g_by_time = {t: g_series[min(len(g_series) - 1, idx)] for idx, t in enumerate(times)}
         tau = compute_road_times(arc_flows, arc_params, g_by_time, times)
         ev_station_waits = compute_station_waits(utilization, station_params, times)
+        # Traveler-facing effective price uses one unified composition throughout the model:
+        # effective_price = base_price + grid_component + local_component.
         effective_prices = {
-            s: {t: electricity_price[s][t] + float(energy_surcharge.get(s, {}).get(t, 0.0)) for t in times}
+            s: {
+                t: electricity_price[s][t]
+                + float((grid_results.get("station_grid_shadow_price", {}) or {}).get(s, {}).get(t, 0.0))
+                + float(energy_surcharge.get(s, {}).get(t, 0.0))
+                for t in times
+            }
+            for s in ev_stations
+        }
+        effective_price_components = {
+            s: {
+                t: {
+                    "base_price": float(electricity_price[s][t]),
+                    "grid_component": float((grid_results.get("station_grid_shadow_price", {}) or {}).get(s, {}).get(t, 0.0)),
+                    "local_component": float(energy_surcharge.get(s, {}).get(t, 0.0)),
+                    "effective_price": float(effective_prices[s][t]),
+                }
+                for t in times
+            }
             for s in ev_stations
         }
         generated = generate_itineraries(data, tau, ev_station_waits, config)
@@ -1278,6 +1328,35 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
         p_vt_req_energy = load_agg["P_vt_req_kw_energy"]
         p_vt_req_grid = load_agg["P_vt_req_kw_grid"]
         ev_energy_kwh = load_agg["E_ev_req"]
+        station_power_request = {
+            s: {t: float(p_ev_req.get(s, {}).get(t, 0.0)) + float(p_vt_req_grid.get(s, {}).get(t, 0.0)) for t in times}
+            for s in ev_stations
+        }
+        if bool(config.get("use_distribution_grid", False)):
+            grid_results = solve_distribution_grid(data, station_power_request, times)
+        else:
+            grid_results = {
+                "distribution_grid_enabled": False,
+                "station_to_bus": {},
+                "bus_voltage": {},
+                "branch_flow_p": {},
+                "branch_loading_ratio": {},
+                "substation_loading": {},
+                "station_grid_available_power": {s: {t: float(station_params[s]["P_site"][t]) for t in times} for s in ev_stations},
+                "station_grid_shadow_price": {s: {t: 0.0 for t in times} for s in ev_stations},
+                "grid_binding_flags": {},
+                "grid_binding_count": 0,
+                "voltage_violation_count": 0,
+                "branch_overload_count": 0,
+                "substation_binding_count": 0,
+            }
+        data.setdefault("diagnostics_runtime", {})["station_power_cap_effective"] = {
+            s: {
+                t: min(float(station_params[s]["P_site"][t]), float(grid_results.get("station_grid_available_power", {}).get(s, {}).get(t, station_params[s]["P_site"][t])))
+                for t in times
+            }
+            for s in ev_stations
+        }
         surcharge_method = config.get("surcharge_method", "shadow_lp")
         shadow_scale = float(config.get("shadow_price_scale", 1.0))
         surcharge_beta = max(1.0e-6, float(config.get("surcharge_beta", 1.0)))
@@ -1288,13 +1367,13 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
         if solver_requested != "highs":
             raise ValueError("config.shared_power_solver must be 'highs' (LP-only mode)")
 
-        shadow_prices: Dict[str, Dict[int, float | None]] = {s: {t: None for t in times} for s in power_stations}
+        shadow_prices: Dict[str, Dict[int, float | None]] = {s: {t: None for t in times} for s in ev_stations}
         shed_ev = {s: {t: 0.0 for t in times} for s in power_stations}
         shed_vt = {s: {t: 0.0 for t in times} for s in power_stations}
         shared_power_residuals = {"INV3": 0.0}
         B_vt_lp = {s: {t: 0.0 for t in times} for s in power_stations}
         P_vt_lp = {s: {t: 0.0 for t in times} for s in power_stations}
-        heuristic_surcharge = {s: {t: 0.0 for t in times} for s in power_stations}
+        heuristic_surcharge = {s: {t: 0.0 for t in times} for s in ev_stations}
 
         if surcharge_method != "shadow_lp":
             raise ValueError("Only surcharge_method='shadow_lp' is supported")
@@ -1316,21 +1395,23 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
         fallback_used = diagnostics["shared_power_solver_used"] != "highs" or not lp_ok
 
         vt_service_prob_target = {s: {t: 1.0 for t in times} for s in power_stations}
-        shed_ratio_map = {s: {t: 0.0 for t in times} for s in power_stations}
-        cap_binding_map = {s: {t: False for t in times} for s in power_stations}
+        shed_ratio_map = {s: {t: 0.0 for t in times} for s in ev_stations}
+        cap_binding_map = {s: {t: False for t in times} for s in ev_stations}
 
-        for s in power_stations:
+        for s in ev_stations:
             for t in times:
                 base_price = max(1.0e-6, float(electricity_price[s][t]))
                 cap, cap_mult_value, cap_abs_value, cap_mode = _compute_cap_values(base_price, config)
-                mu_kw = shadow_prices[s][t]
+                local_mu_kw = float((shadow_prices.get(s, {}) or {}).get(t, 0.0) or 0.0)
+                grid_mu_kw = float((grid_results.get("station_grid_shadow_price", {}) or {}).get(s, {}).get(t, 0.0) or 0.0)
+                mu_kw = local_mu_kw + float(config.get("grid_shadow_price_scale", 1.0)) * grid_mu_kw
                 if diagnostics.get("shared_power_solver_used") == "highs":
                     raw = shadow_scale * (float(mu_kw or 0.0) ** surcharge_beta) / max(1e-9, delta_t)
                     raw_surcharge_uncapped[s][t] = raw
                     raw_surcharge[s][t] = min(raw, cap)
                 else:
                     raw_surcharge_uncapped[s][t] = None
-                    heuristic_surcharge[s][t] = max(0.0, (float(p_ev_req[s][t]) + float(p_vt_req_grid[s][t])) / max(1e-6, float(station_params[s]["P_site"][t])) - 1.0) * cap
+                    heuristic_surcharge[s][t] = max(0.0, (float(p_ev_req.get(s, {}).get(t, 0.0)) + float(p_vt_req_grid.get(s, {}).get(t, 0.0))) / max(1e-6, float(data["diagnostics_runtime"]["station_power_cap_effective"].get(s, {}).get(t, station_params[s]["P_site"][t]))) - 1.0) * cap
                     raw_surcharge[s][t] = min(heuristic_surcharge[s][t], cap)
                 cap_binding_map[s][t] = (raw_surcharge_uncapped[s][t] is not None and float(raw_surcharge_uncapped[s][t]) > cap - 1.0e-9) or (raw_surcharge_uncapped[s][t] is None and raw_surcharge[s][t] >= cap - 1.0e-9)
 
@@ -1342,17 +1423,18 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
                 else:
                     shed_ratio = min(1.0, max(0.0, shed_vt_kwh / max(1.0e-9, req_e_vt)))
                     target_prob = max(float(config["vt_reliability_floor"]), 1.0 - shed_ratio)
-                vt_service_prob_target[s][t] = target_prob
+                if s in vt_service_prob_target:
+                    vt_service_prob_target[s][t] = target_prob
                 shed_ratio_map[s][t] = shed_ratio
 
-        prev_surcharge = {s: {t: energy_surcharge[s][t] for t in times} for s in power_stations}
-        prev_raw = {s: {t: float(raw_surcharge[s][t]) for t in times} for s in power_stations}
+        prev_surcharge = {s: {t: energy_surcharge[s][t] for t in times} for s in ev_stations}
+        prev_raw = {s: {t: float(raw_surcharge[s][t]) for t in times} for s in ev_stations}
         alpha_override = config.get("surcharge_msa_alpha")
         alpha = float(alpha_override) if alpha_override is not None else 1.0 / (iteration + 1.0)
         alpha_vt = config.get("vt_reliability_alpha")
         alpha_vt = float(alpha_vt) if alpha_vt is not None else alpha
 
-        for s in power_stations:
+        for s in ev_stations:
             for t in times:
                 candidate = (1.0 - alpha) * energy_surcharge[s][t] + alpha * raw_surcharge[s][t]
                 raw_thr = float(config.get("surcharge_decay_raw_threshold", 1.0e-3))
@@ -1367,16 +1449,19 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
                 else:
                     raw_zero_streak[s][t] = 0
                     energy_surcharge[s][t] = max(0.0, candidate)
-                vt_next = (1.0 - alpha_vt) * vt_service_prob[s][t] + alpha_vt * vt_service_prob_target[s][t]
-                vt_floor = float(config.get("vt_reliability_floor", 0.05))
-                vt_service_prob[s][t] = min(1.0, max(vt_floor, vt_next))
+                if s in vt_service_prob_target:
+                    vt_next = (1.0 - alpha_vt) * vt_service_prob[s][t] + alpha_vt * vt_service_prob_target[s][t]
+                    vt_floor = float(config.get("vt_reliability_floor", 0.05))
+                    vt_service_prob[s][t] = min(1.0, max(vt_floor, vt_next))
                 base_price = max(1.0e-6, float(electricity_price[s][t]))
-                p_site_raw = float(station_params[s]["P_site"][t])
+                p_site_raw = float(data["diagnostics_runtime"]["station_power_cap_effective"].get(s, {}).get(t, station_params[s]["P_site"][t]))
                 p_site_den = _safe_den(p_site_raw)
                 p_ev_req_kw = float(p_ev_req[s][t])
-                p_vt_req_energy_kw = float(p_vt_req_energy[s][t])
-                p_vt_req_grid_kw = float(p_vt_req_grid[s][t])
+                p_vt_req_energy_kw = float(p_vt_req_energy.get(s, {}).get(t, 0.0))
+                p_vt_req_grid_kw = float(p_vt_req_grid.get(s, {}).get(t, 0.0))
                 p_ev_served_kw = max(0.0, p_ev_req_kw - (shed_ev or {}).get(s, {}).get(t, 0.0))
+                if s not in power_stations:
+                    p_ev_served_kw = min(p_ev_served_kw, p_site_raw)
                 p_vt_served_kw = (P_vt_lp or {}).get(s, {}).get(t, 0.0)
                 t_idx = times.index(t)
                 t_next = times[t_idx + 1] if t_idx + 1 < len(times) else None
@@ -1397,24 +1482,29 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
                     else:
                         b_after = None
                 if b_before is None:
-                    missing_inventory_reporting = True
+                    if s in power_stations:
+                        missing_inventory_reporting = True
                     b_before = 0.0
                 if b_after is None:
-                    missing_inventory_reporting = True
+                    if s in power_stations:
+                        missing_inventory_reporting = True
                     b_after = 0.0
                 b_before = float(b_before)
                 b_after = float(b_after)
                 p_net_served_kw = p_ev_served_kw + p_vt_served_kw
-                current_shed_ratio = 0.0 if float(e_vt_req[s][t]) <= 1.0e-12 else float((shed_vt or {}).get(s, {}).get(t, 0.0)) / max(1.0e-12, float(e_vt_req[s][t]))
+                current_shed_ratio = 0.0 if float(e_vt_req.get(s, {}).get(t, 0.0)) <= 1.0e-12 else float((shed_vt or {}).get(s, {}).get(t, 0.0)) / max(1.0e-12, float(e_vt_req.get(s, {}).get(t, 0.0)))
                 current_shed_ratio = min(1.0, max(0.0, current_shed_ratio))
                 vt_prob_from_shed = min(1.0, max(0.0, 1.0 - current_shed_ratio))
                 ev_req_den = max(1.0e-9, float(p_ev_req_kw))
                 ev_prob_from_shed = 1.0 - float((shed_ev or {}).get(s, {}).get(t, 0.0)) / ev_req_den
+                grid_cap_here = float((grid_results.get("station_grid_available_power", {}) or {}).get(s, {}).get(t, p_site_raw))
+                total_req_here = float(p_ev_req_kw + p_vt_req_grid_kw)
+                grid_prob = 1.0 if total_req_here <= 1.0e-9 else min(1.0, max(0.0, grid_cap_here / max(1.0e-9, total_req_here)))
                 ev_floor = float(config.get("ev_reliability_floor", 0.05))
-                ev_prob_from_shed = min(1.0, max(ev_floor, ev_prob_from_shed))
+                ev_prob_from_shed = min(1.0, max(ev_floor, min(ev_prob_from_shed, grid_prob)))
                 ev_service_prob[s][t] = ev_prob_from_shed
                 solver_used = diagnostics.get("shared_power_solver_used")
-                mu_entry = _clean_number(shadow_prices[s][t]) if (shadow_prices[s][t] is not None and solver_used == "highs") else None
+                mu_entry = _clean_number((shadow_prices.get(s, {}) or {}).get(t)) if ((shadow_prices.get(s, {}) or {}).get(t) is not None and solver_used == "highs") else None
                 uncapped_entry = _clean_number(raw_surcharge_uncapped[s][t]) if (raw_surcharge_uncapped[s][t] is not None and solver_used == "highs") else None
                 ratio_req_exogenous = (p_ev_req_kw + p_vt_req_grid_kw) / p_site_den
                 ratio_req_energy = (p_ev_req_kw + p_vt_req_energy_kw) / p_site_den
@@ -1430,6 +1520,10 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
                     "P_vt_req_kw_energy": _clean_number(p_vt_req_energy_kw),
                     "P_vt_req_kw_grid": _clean_number(p_vt_req_grid_kw),
                     "mu_kw": mu_entry,
+                    "base_price": float(electricity_price[s][t]),
+                    "grid_price_component": float((grid_results.get("station_grid_shadow_price", {}) or {}).get(s, {}).get(t, 0.0)),
+                    "local_price_component": float(energy_surcharge[s][t]),
+                    "effective_price": float(effective_prices[s][t]),
                     "raw_surcharge_uncapped_kwh": uncapped_entry,
                     "raw_surcharge_uncapped": uncapped_entry,
                     "raw_surcharge_capped_kwh": _clean_number(raw_surcharge[s][t]),
@@ -1443,7 +1537,7 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
                     "cap_abs_value": cap_abs_value,
                     "cap_mode": cap_mode,
                     "cap_binding": cap_binding_map[s][t],
-                    "E_vt_req_kwh": e_vt_req[s][t],
+                    "E_vt_req_kwh": e_vt_req.get(s, {}).get(t, 0.0),
                     "P_vt_charge_kw": p_vt_served_kw,
                     "B_before_kwh": b_before,
                     "B_after_kwh": b_after,
@@ -1452,21 +1546,21 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
                     "p_ev_served_kw": p_ev_served_kw,
                     "p_vt_served_kw": p_vt_served_kw,
                     "p_net_served_kw": p_net_served_kw,
-                    "vt_service_prob_target": vt_service_prob_target[s][t],
-                    "vt_service_prob": vt_service_prob[s][t],
-                    "ev_service_prob": ev_service_prob[s][t],
+                    "vt_service_prob_target": vt_service_prob_target.get(s, {}).get(t, 1.0),
+                    "vt_service_prob": vt_service_prob.get(s, {}).get(t, 1.0),
+                    "ev_service_prob": ev_service_prob.get(s, {}).get(t, 1.0),
                     "shed_ratio": current_shed_ratio,
                     "solver_used": solver_used,
                     "fallback_used": fallback_used,
                 }
 
         dprice = max(
-            abs(energy_surcharge[s][t] - prev_surcharge[s][t]) for s in power_stations for t in times
+            abs(energy_surcharge[s][t] - prev_surcharge[s][t]) for s in ev_stations for t in times
         )
         dprice_raw = max(
-            abs(raw_surcharge[s][t] - prev_raw[s][t]) for s in power_stations for t in times
+            abs(raw_surcharge[s][t] - prev_raw[s][t]) for s in ev_stations for t in times
         )
-        max_surcharge = max(energy_surcharge[s][t] for s in power_stations for t in times) if power_stations else 0.0
+        max_surcharge = max(energy_surcharge[s][t] for s in ev_stations for t in times) if ev_stations else 0.0
         diagnostics["dx_history"].append(dx)
         diagnostics["dn_history"].append(dn)
         diagnostics["dprice_history"].append(dprice)
@@ -1494,12 +1588,14 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
             "stations": {},
         }
         for s in power_stations[:3]:
-            base_price = electricity_price[s][peak_t]
-            surcharge = energy_surcharge[s][peak_t]
+            base_price = float(electricity_price[s][peak_t])
+            grid_component = float((grid_results.get("station_grid_shadow_price", {}) or {}).get(s, {}).get(peak_t, 0.0))
+            local_component = float(energy_surcharge[s][peak_t])
             snapshot["stations"][s] = {
                 "base_price": base_price,
-                "surcharge": surcharge,
-                "effective_price": base_price + surcharge,
+                "grid_component": grid_component,
+                "local_component": local_component,
+                "effective_price": float(effective_prices[s][peak_t]),
             }
         diagnostics["price_snapshots"].append(snapshot)
 
@@ -1888,6 +1984,24 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
     else:
         diagnostics["bottleneck_summary"] = "mixed_without_active_shared_power_price_signal"
 
+    grid_station_caps = grid_results.get("station_grid_available_power", {}) if isinstance(grid_results, dict) else {}
+    station_power_cap_effective = data.get("diagnostics_runtime", {}).get("station_power_cap_effective", {})
+    num_stations_grid_limited = sum(
+        1
+        for s in ev_stations
+        if any(
+            float(grid_station_caps.get(s, {}).get(t, station_params[s]["P_site"][t])) + 1.0e-9 < float(station_params[s]["P_site"][t])
+            and float(load_agg.get("P_total_req", {}).get(s, {}).get(t, 0.0)) > float(grid_station_caps.get(s, {}).get(t, station_params[s]["P_site"][t])) + 1.0e-9
+            for t in times
+        )
+    )
+    branch_loading_map = grid_results.get("branch_loading_ratio", {}) if isinstance(grid_results, dict) else {}
+    bus_voltage_map = grid_results.get("bus_voltage", {}) if isinstance(grid_results, dict) else {}
+    grid_shadow_map = grid_results.get("station_grid_shadow_price", {}) if isinstance(grid_results, dict) else {}
+    max_branch_loading_ratio = max((float(v) for br in branch_loading_map.values() for v in br.values()), default=0.0)
+    min_bus_voltage = min((float(v) for bus in bus_voltage_map.values() for v in bus.values()), default=1.0)
+    max_grid_shadow_price = max((float(v) for st in grid_shadow_map.values() for v in st.values()), default=0.0)
+
     results = {
         "x": arc_flows,
         "tau": tau,
@@ -1905,6 +2019,9 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
         "e_dep": e_dep,
         "inventory": {"B_vt": B_vt, "P_vt": P_vt, "residuals": inv_residuals},
         "shadow_price_power": shadow_prices,
+        "distribution_grid": grid_results,
+        "effective_price": effective_prices,
+        "effective_price_components": effective_price_components,
         "surcharge_power": energy_surcharge,
         "surcharge_power_raw": raw_surcharge,
         "surcharge_power_uncapped": raw_surcharge_uncapped,
@@ -1944,11 +2061,31 @@ def run_equilibrium(data: Dict[str, Any], overrides: Dict[str, Any] | None = Non
             "cbd_tau": cbd_tau,
             "cbd_tau_used": cbd_tau,
             "station_loads": load_agg,
+            "distribution_grid": grid_results,
+            "effective_price": effective_prices,
+            "effective_price_components": effective_price_components,
             "vt_service_prob": vt_service_prob,
             "ev_service_prob": ev_service_prob,
             "vt_inventory_B": B_vt_report,
             "vt_charge_power_P": P_vt_lp,
             "shared_power_lp": shared_power_lp_diag,
+            "distribution_grid_enabled": grid_results.get("distribution_grid_enabled", False),
+            "station_to_bus": grid_results.get("station_to_bus", {}),
+            "bus_voltage": grid_results.get("bus_voltage", {}),
+            "branch_flow_p": grid_results.get("branch_flow_p", {}),
+            "branch_loading_ratio": grid_results.get("branch_loading_ratio", {}),
+            "substation_loading": grid_results.get("substation_loading", {}),
+            "station_grid_available_power": grid_results.get("station_grid_available_power", {}),
+            "station_grid_shadow_price": grid_results.get("station_grid_shadow_price", {}),
+            "station_power_cap_effective": station_power_cap_effective,
+            "grid_binding_count": grid_results.get("grid_binding_count", 0),
+            "num_stations_grid_limited": num_stations_grid_limited,
+            "max_branch_loading_ratio": max_branch_loading_ratio,
+            "min_bus_voltage": min_bus_voltage,
+            "max_grid_shadow_price": max_grid_shadow_price,
+            "voltage_violation_count": grid_results.get("voltage_violation_count", 0),
+            "branch_overload_count": grid_results.get("branch_overload_count", 0),
+            "substation_binding_count": grid_results.get("substation_binding_count", 0),
             "missing_inventory_reporting": missing_inventory_reporting,
             "iter_count_total": last_iteration,
             "max_iter_effective": current_max_iter,
@@ -2135,6 +2272,9 @@ def main() -> None:
             },
             "config_used": data.get("config", {}),
             "equilibrium": equilibrium,
+            "effective_price": results.get("effective_price", {}),
+            "effective_price_components": results.get("effective_price_components", {}),
+            "distribution_grid": results.get("distribution_grid", {}),
             "summary": {
                 "representative_od": diagnostics_full.get("representative_od"),
                 "case_label": diagnostics_full.get("case_label"),
@@ -2152,6 +2292,12 @@ def main() -> None:
                 "bottleneck_summary": diagnostics_full.get("bottleneck_summary"),
                 "power_binding_count": diagnostics_full.get("power_binding_count"),
                 "max_surcharge": diagnostics_summary.get("max_surcharge"),
+                "distribution_grid_enabled": diagnostics_full.get("distribution_grid_enabled"),
+                "grid_binding_count": diagnostics_full.get("grid_binding_count"),
+                "num_stations_grid_limited": diagnostics_full.get("num_stations_grid_limited"),
+                "max_branch_loading_ratio": diagnostics_full.get("max_branch_loading_ratio"),
+                "min_bus_voltage": diagnostics_full.get("min_bus_voltage"),
+                "max_grid_shadow_price": diagnostics_full.get("max_grid_shadow_price"),
             },
             "surcharge_power": results["surcharge_power"],
             "surcharge_power_uncapped": results.get("surcharge_power_uncapped", {}),
@@ -2169,6 +2315,8 @@ def main() -> None:
                 "terminal_soc_by_station": diagnostics_full.get("terminal_soc_by_station", {}),
                 "storage_energy_totals_by_station": diagnostics_full.get("storage_energy_totals_by_station", {}),
                 "storage_model_status_by_station": diagnostics_full.get("storage_model_status_by_station", {}),
+                "effective_price": diagnostics_full.get("effective_price", {}),
+                "effective_price_components": diagnostics_full.get("effective_price_components", {}),
             }
 
         report["diagnostics"]["surcharge_kappa"] = data.get("config", {}).get("surcharge_kappa")
