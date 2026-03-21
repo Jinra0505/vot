@@ -1,7 +1,56 @@
 from typing import Any, Dict, List, Set
 
 from .assignment import is_evtol_itinerary
+from .dist_grid import validate_distribution_grid
 from .utils import load_yaml, require_paths
+
+
+def _normalize_vt_station_permissions(data: Dict[str, Any]) -> None:
+    sets = data.setdefault("sets", {})
+    params = data.setdefault("parameters", {})
+    hybrid_stations = [str(x) for x in sets.get("hybrid_stations", [])]
+
+    dep_allowed_raw = params.get("vt_departure_allowed", {})
+    arr_allowed_raw = params.get("vt_arrival_allowed", {})
+    if dep_allowed_raw is None:
+        dep_allowed_raw = {}
+    if arr_allowed_raw is None:
+        arr_allowed_raw = {}
+    if not isinstance(dep_allowed_raw, dict):
+        raise ValueError("Invalid field: parameters.vt_departure_allowed must be a dict keyed by hybrid station")
+    if not isinstance(arr_allowed_raw, dict):
+        raise ValueError("Invalid field: parameters.vt_arrival_allowed must be a dict keyed by hybrid station")
+
+    hybrid_set = set(hybrid_stations)
+    dep_extra = sorted(set(str(k) for k in dep_allowed_raw.keys()) - hybrid_set)
+    arr_extra = sorted(set(str(k) for k in arr_allowed_raw.keys()) - hybrid_set)
+    if dep_extra:
+        raise ValueError(f"Invalid field: parameters.vt_departure_allowed contains non-hybrid stations {dep_extra}")
+    if arr_extra:
+        raise ValueError(f"Invalid field: parameters.vt_arrival_allowed contains non-hybrid stations {arr_extra}")
+
+    dep_allowed = {s: bool(dep_allowed_raw.get(s, True)) for s in hybrid_stations}
+    arr_allowed = {s: bool(arr_allowed_raw.get(s, True)) for s in hybrid_stations}
+    params["vt_departure_allowed"] = dep_allowed
+    params["vt_arrival_allowed"] = arr_allowed
+
+    zero_time_template = {t: 0.0 for t in sets.get("time", [])}
+    for key in ("vertiport_cap_pax", "vt_departure_capacity_total", "vt_departure_capacity_fast", "vt_departure_capacity"):
+        mapping = params.get(key)
+        if mapping is None:
+            continue
+        if not isinstance(mapping, dict):
+            raise ValueError(f"Invalid field: parameters.{key} must be a dict keyed by hybrid station")
+        for s in hybrid_stations:
+            if s not in mapping and not dep_allowed[s]:
+                mapping[s] = dict(zero_time_template)
+    aircraft_init = params.get("vt_aircraft_init_by_station")
+    if aircraft_init is not None:
+        if not isinstance(aircraft_init, dict):
+            raise ValueError("Invalid field: parameters.vt_aircraft_init_by_station must be a dict keyed by hybrid station")
+        for s in hybrid_stations:
+            if s not in aircraft_init and not dep_allowed[s]:
+                aircraft_init[s] = 0.0
 
 
 def _coerce_numeric_keys(obj: Any) -> Any:
@@ -132,6 +181,12 @@ def _validate_station_facility_consistency(data: Dict[str, Any]) -> None:
     ev_stations: Set[str] = set(str(x) for x in sets.get("ev_stations", []))
     hybrid_stations: Set[str] = set(str(x) for x in sets.get("hybrid_stations", []))
     stations: Set[str] = set(str(x) for x in sets.get("stations", []))
+    dep_allowed = {
+        str(k): bool(v) for k, v in params.get("vt_departure_allowed", {}).items()
+    }
+    arr_allowed = {
+        str(k): bool(v) for k, v in params.get("vt_arrival_allowed", {}).items()
+    }
 
     if not ev_stations:
         raise ValueError("sets.ev_stations must be non-empty")
@@ -169,6 +224,29 @@ def _validate_station_facility_consistency(data: Dict[str, Any]) -> None:
     if params.get("vt_departure_capacity") is not None:
         _require_hybrid_param_complete(params, hybrid_stations, "vt_departure_capacity", times)
 
+    dep_enabled = [s for s in hybrid_stations if dep_allowed.get(s, True)]
+    arr_enabled = [s for s in hybrid_stations if arr_allowed.get(s, True)]
+    if not dep_enabled:
+        raise ValueError("Invalid station permissions: at least one hybrid station must allow VT departures")
+    if not arr_enabled:
+        raise ValueError("Invalid station permissions: at least one hybrid station must allow VT arrivals")
+
+    for s in hybrid_stations:
+        if not dep_allowed.get(s, True):
+            if float(params.get("vt_aircraft_init_by_station", {}).get(s, 0.0)) > 1.0e-9:
+                raise ValueError(
+                    f"Invalid field: parameters.vt_aircraft_init_by_station.{s} must be 0 when vt_departure_allowed[{s}] is false"
+                )
+            for key in ("vertiport_cap_pax", "vt_departure_capacity_total", "vt_departure_capacity_fast", "vt_departure_capacity"):
+                mapping = params.get(key)
+                if mapping is None:
+                    continue
+                for t, val in (mapping.get(s, {}) or {}).items():
+                    if float(val) > 1.0e-9:
+                        raise ValueError(
+                            f"Invalid field: parameters.{key}.{s}.{t} must be 0 when vt_departure_allowed[{s}] is false"
+                        )
+
     itineraries = data.get("itineraries", []) if isinstance(data.get("itineraries"), list) else []
     for it in itineraries:
         it_id = it.get("id", "<unknown>")
@@ -189,10 +267,18 @@ def _validate_station_facility_consistency(data: Dict[str, Any]) -> None:
                 raise ValueError(
                     f"Invalid itinerary field: itineraries[{it_id}].dep_station={dep} must belong to sets.hybrid_stations"
                 )
+            if not dep_allowed.get(dep, True):
+                raise ValueError(
+                    f"Invalid itinerary field: itineraries[{it_id}].dep_station={dep} is not allowed for VT departures"
+                )
             arr = str(it.get("arr_station")) if it.get("arr_station") is not None else None
             if arr is not None and arr not in hybrid_stations:
                 raise ValueError(
                     f"Invalid itinerary field: itineraries[{it_id}].arr_station={arr} must belong to sets.hybrid_stations"
+                )
+            if arr is not None and not arr_allowed.get(arr, True):
+                raise ValueError(
+                    f"Invalid itinerary field: itineraries[{it_id}].arr_station={arr} is not allowed for VT arrivals"
                 )
 
 
@@ -213,6 +299,7 @@ def load_data(data_path: str, schema_path: str) -> Dict[str, Any]:
     data = _coerce_numeric_values(data)
     _normalize_od_structures(data)
     _harmonize_access_energy_fields(data)
+    data.setdefault("config", {}).setdefault("use_distribution_grid", False)
 
     required_paths = schema.get("required_paths", [])
     try:
@@ -221,5 +308,7 @@ def load_data(data_path: str, schema_path: str) -> Dict[str, Any]:
         raise ValueError(f"Schema validation failed for {data_path}: {exc}") from exc
 
     _validate_basic_shapes(data)
+    _normalize_vt_station_permissions(data)
     _validate_station_facility_consistency(data)
+    validate_distribution_grid(data)
     return data
