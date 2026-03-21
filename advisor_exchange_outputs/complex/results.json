@@ -61032,11 +61032,11 @@
       "runner_file": "/workspace/vot/runner_new_background_boundary_flow.py",
       "charging_file": "/workspace/vot/charging_hiGHS_and_gurobi_bound_fix.py",
       "sys_path_head": [
-        "",
-        "/workspace/vot/.deps",
         "/workspace",
         "/root/.pyenv/versions/3.12.12/lib/python312.zip",
-        "/root/.pyenv/versions/3.12.12/lib/python3.12"
+        "/root/.pyenv/versions/3.12.12/lib/python3.12",
+        "/root/.pyenv/versions/3.12.12/lib/python3.12/lib-dynload",
+        "/root/.pyenv/versions/3.12.12/lib/python3.12/site-packages"
       ]
     },
     "station_sets": {
@@ -61107,7 +61107,7 @@
       "tol": 0.7,
       "strict_convergence": true,
       "strict_audit": true,
-      "audit_raise": false,
+      "audit_raise": true,
       "terminal_soc_policy": "at_least_init",
       "terminal_soc_target_kwh": null
     },

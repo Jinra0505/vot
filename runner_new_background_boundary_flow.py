@@ -2207,17 +2207,21 @@ def save_outputs(results: Dict[str, Any], path: str) -> None:
 def _resolve_path(path: str, fallback: str) -> str:
     import os
 
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = module_dir
     candidates = [
         path,
         os.path.join(os.getcwd(), path),
+        os.path.join(module_dir, path),
     ]
-    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     candidates.extend([
         os.path.join(repo_root, path),
         os.path.join(repo_root, "project", "data", os.path.basename(path)),
         os.path.join(repo_root, "project", os.path.basename(path)),
         fallback,
         os.path.join(repo_root, fallback),
+        os.path.join(module_dir, os.path.basename(path)),
+        os.path.join(module_dir, os.path.basename(fallback)),
     ])
     for cand in candidates:
         if cand and os.path.exists(cand):
