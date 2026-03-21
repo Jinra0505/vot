@@ -1,0 +1,237 @@
+{
+  "summary": {
+    "stop_reason": "patience",
+    "iter_count": 19,
+    "converged_loose": true,
+    "converged_strictly": true,
+    "warning_count": 1,
+    "severe_count": 0
+  },
+  "report_excerpt": {
+    "effective_price": {
+      "sE": {
+        "1": 1.7351392713553824,
+        "2": 1.7642755185753807,
+        "3": 1.7351392713553824
+      },
+      "sC": {
+        "1": 1.801245411459938,
+        "2": 1.840037165655946,
+        "3": 1.801245411459938
+      },
+      "sO": {
+        "1": 1.7679803386288608,
+        "2": 1.8067992018853916,
+        "3": 1.7679803386288608
+      }
+    },
+    "effective_price_components": {
+      "sE": {
+        "1": {
+          "base_price": 0.22,
+          "grid_component": 0.0,
+          "local_component": 1.5151392713553824,
+          "effective_price": 1.7351392713553824
+        },
+        "2": {
+          "base_price": 0.25,
+          "grid_component": 0.0,
+          "local_component": 1.5142755185753807,
+          "effective_price": 1.7642755185753807
+        },
+        "3": {
+          "base_price": 0.22,
+          "grid_component": 0.0,
+          "local_component": 1.5151392713553824,
+          "effective_price": 1.7351392713553824
+        }
+      },
+      "sC": {
+        "1": {
+          "base_price": 0.3,
+          "grid_component": 0.0,
+          "local_component": 1.501245411459938,
+          "effective_price": 1.801245411459938
+        },
+        "2": {
+          "base_price": 0.34,
+          "grid_component": 0.0,
+          "local_component": 1.500037165655946,
+          "effective_price": 1.840037165655946
+        },
+        "3": {
+          "base_price": 0.3,
+          "grid_component": 0.0,
+          "local_component": 1.501245411459938,
+          "effective_price": 1.801245411459938
+        }
+      },
+      "sO": {
+        "1": {
+          "base_price": 0.26,
+          "grid_component": 0.0,
+          "local_component": 1.5079803386288608,
+          "effective_price": 1.7679803386288608
+        },
+        "2": {
+          "base_price": 0.3,
+          "grid_component": 0.0,
+          "local_component": 1.5067992018853915,
+          "effective_price": 1.8067992018853916
+        },
+        "3": {
+          "base_price": 0.26,
+          "grid_component": 0.0,
+          "local_component": 1.5079803386288608,
+          "effective_price": 1.7679803386288608
+        }
+      }
+    },
+    "distribution_grid": {
+      "distribution_grid_enabled": true,
+      "bus_voltage": {
+        "sb0": {
+          "1": 1.0,
+          "2": 1.0,
+          "3": 1.0
+        },
+        "sb1": {
+          "1": 0.9585617821430962,
+          "2": 0.9439047493919357,
+          "3": 0.9575646725535115
+        },
+        "sb2": {
+          "1": 0.9164207138555059,
+          "2": 0.884463556573189,
+          "3": 0.9152176119716142
+        }
+      },
+      "branch_flow_p": {
+        "sbr01": {
+          "1": 103.59554464225965,
+          "2": 140.2381265201609,
+          "3": 106.08831861622119
+        },
+        "sbr12": {
+          "1": 60.201526125128964,
+          "2": 84.91598974106677,
+          "3": 60.49580083128194
+        }
+      },
+      "branch_loading_ratio": {
+        "sbr01": {
+          "1": 0.7144520320155838,
+          "2": 0.967159493242489,
+          "3": 0.7316435766635944
+        },
+        "sbr12": {
+          "1": 0.6543644144035757,
+          "2": 0.9229998884898561,
+          "3": 0.6575630525139341
+        }
+      },
+      "substation_loading": {
+        "1": 103.59554464225965,
+        "2": 140.2381265201609,
+        "3": 106.08831861622119
+      },
+      "station_grid_available_power": {
+        "sO": {
+          "1": 25.394018517130682,
+          "2": 37.322136779094144,
+          "3": 27.592517784939243
+        },
+        "sC": {
+          "1": 0.0,
+          "2": 0.0,
+          "3": 0.0
+        },
+        "sE": {
+          "1": 48.201526125128964,
+          "2": 72.91598974106677,
+          "3": 48.49580083128194
+        }
+      },
+      "station_grid_shadow_price": {
+        "sO": {
+          "1": 0.0,
+          "2": 0.0,
+          "3": 0.0
+        },
+        "sC": {
+          "1": 0.0,
+          "2": 0.0,
+          "3": 0.0
+        },
+        "sE": {
+          "1": 0.0,
+          "2": 0.0,
+          "3": 0.0
+        }
+      },
+      "grid_binding_flags": {
+        "branch": {
+          "sbr01": {
+            "1": false,
+            "2": false,
+            "3": false
+          },
+          "sbr12": {
+            "1": false,
+            "2": false,
+            "3": false
+          }
+        },
+        "voltage": {
+          "sb0": {
+            "1": false,
+            "2": false,
+            "3": false
+          },
+          "sb1": {
+            "1": false,
+            "2": false,
+            "3": false
+          },
+          "sb2": {
+            "1": false,
+            "2": false,
+            "3": false
+          }
+        },
+        "substation": {
+          "1": false,
+          "2": false,
+          "3": false
+        },
+        "station": {
+          "sO": {
+            "1": false,
+            "2": false,
+            "3": false
+          },
+          "sC": {
+            "1": false,
+            "2": false,
+            "3": false
+          },
+          "sE": {
+            "1": false,
+            "2": false,
+            "3": false
+          }
+        }
+      },
+      "grid_binding_count": 0,
+      "voltage_violation_count": 0,
+      "branch_overload_count": 0,
+      "substation_binding_count": 0,
+      "station_to_bus": {
+        "sO": "sb1",
+        "sC": "sb1",
+        "sE": "sb2"
+      },
+      "solver": "highs_two_stage"
+    }
+  }
+}
